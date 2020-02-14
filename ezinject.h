@@ -11,6 +11,9 @@
 #define UNUSED(x) (void)(x)
 #define UPTR(x) ((uintptr_t)(x))
 
+#define DBGADDR(addr) \
+	DBGPTR(addr.remote); \
+	DBGPTR(addr.local)
 
 #define STRSZ(x) (strlen(x) + 1)
 #define ALIGNMSK(y) ((y)-1)
@@ -66,6 +69,11 @@ typedef struct {
 	void *end;
 } ez_region;
 
+typedef struct {
+	ez_addr baseaddr;
+	void *handle;
+} ez_lib;
+
 #define REGION_LENGTH(r) PTRDIFF(r.end, r.start)
 
 // base.local + (addr - remote.base)
@@ -77,6 +85,12 @@ struct ezinj_pl {
 	struct injcode_bearing *br_start;
 	uint8_t *code_start;
 	uint8_t *sc_ret;
+};
+
+struct ezinj_backup {
+	uintptr_t base;
+	size_t size;
+	uint8_t data[];
 };
 
 struct ezinj_ctx {
@@ -98,6 +112,7 @@ struct ezinj_ctx {
 	int shm_id;
 	int sem_id;
 	void *mapped_mem;
+	struct ezinj_backup backup;
 };
 
 struct ezinj_str {

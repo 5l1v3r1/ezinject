@@ -19,7 +19,6 @@
 #endif
 
 #define BR_STRTBL(br) ((char *)br + sizeof(*br) + (sizeof(char *) * br->argc))
-#define BR_USERDATA(br) ((char *)br + sizeof(*br) + br->dyn_size)
 
 #define EMIT_LABEL(name) \
 	asm volatile( \

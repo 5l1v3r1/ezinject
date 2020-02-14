@@ -139,12 +139,20 @@ endfunction()
 add_subdirectory(crt)
 add_subdirectory(samples)
 
-
-add_executable(ezinject
+set(ezinject_sources
 	ezinject.c
+	ezinject_common.c
 	ezinject_injcode.c
 	util.c
 )
+
+if(HAVE_LIBC_DLOPEN_MODE)
+	list(APPEND ezinject_sources ezinject_glibc.c)
+elseif(HAVE_DL_LOAD_SHARED_LIBRARY)
+	list(APPEND ezinject_sources ezinject_uclibc.c)
+endif()
+
+add_executable(ezinject ${ezinject_sources})
 
 # -fno-toplevel-reorder: keep order of code as it was written
 # -fno-stack-protector: remove stack cookie checks

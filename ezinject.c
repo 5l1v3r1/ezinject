@@ -27,6 +27,7 @@
 
 #include "util.h"
 #include "ezinject.h"
+#include "ezinject_common.h"
 #include "ezinject_arch.h"
 #include "ezinject_injcode.h"
 
@@ -140,128 +141,25 @@ struct ezinj_str ezstr_new(char *str){
 	return bstr;
 }
 
-ez_addr sym_addr(void *handle, const char *sym_name, ez_addr lib){
-	uintptr_t sym_addr = (uintptr_t)dlsym(handle, sym_name);
-	ez_addr sym = {
-		.local = sym_addr,
-		.remote = EZ_REMOTE(lib, sym_addr)
-	};
-	return sym;
-}
-
 int libc_init(struct ezinj_ctx *ctx){	
-	char *ignores[] = {"ld-", NULL};
-	ez_addr libc = {
-		.local  = (uintptr_t) get_base(getpid(), "libc", ignores),
-		.remote = (uintptr_t) get_base(ctx->target, "libc", ignores)
-	};
-	
-	DBGPTR(libc.remote);
-	DBGPTR(libc.local);
-
-	if(!libc.local || !libc.remote) {
-		ERR("Failed to get libc base");
-		return 1;
-	}
-	ctx->libc = libc;
-
-	void *h_libc = dlopen(C_LIBRARY_NAME, RTLD_LAZY);
-	if(!h_libc){
-		ERR("dlopen("C_LIBRARY_NAME") failed: %s", dlerror());
+	ez_lib libc;
+	if(lib_open(ctx->target, C_LIBRARY_NAME, "libc", common_ignores, &libc) != 0){
+		ERR("Failed to open C library");
 		return 1;
 	}
 
-#if defined(HAVE_LIBC_DLOPEN_MODE)
-	ez_addr libc_dlopen = sym_addr(h_libc, "__libc_dlopen_mode", libc);
-#elif defined(HAVE_DL_LOAD_SHARED_LIBRARY)
-	ez_addr ldso = {
-		.local = (uintptr_t)get_base(getpid(), "ld-uClibc", NULL),
-		.remote = (uintptr_t)get_base(ctx->target, "ld-uClibc", NULL)
-	};
-	if(!ldso.local || !ldso.remote){
-		ERR("Failed to get ldso base");
-		return 1;
-	}
+	// hook point for libc-specific initialization
+	libc_init_hook(ctx, libc);
 
-	void *h_ldso = dlopen(DYN_LINKER_NAME, RTLD_LAZY);
-	if(!h_ldso){
-		ERR("dlopen("DYN_LINKER_NAME") failed: %s", dlerror());
-		return 1;
-	}
-
-	{
-		void *h_libdl = dlopen(DL_LIBRARY_NAME, RTLD_LAZY);
-		if(!h_libdl){
-			ERR("dlopen("DL_LIBRARY_NAME") failed: %s", dlerror());
-			return 1;
-		}
-
-		ez_addr libdl = {
-			.local = (uintptr_t)get_base(getpid(), "libdl", NULL),
-			.remote = (uintptr_t)get_base(ctx->target, "libdl", NULL)
-		};
-
-		DBGPTR(libdl.local);
-		DBGPTR(libdl.remote);
-
-		if(libdl.remote != 0){
-			// target has libdl loaded. this makes things easier for us
-			ctx->actual_dlopen = sym_addr(h_libdl, "dlopen", libdl);
-		} else {
-			// target has no libdl loaded. we will need to load it ourselves
-			void *dlopen_local = dlsym(h_libdl, "dlopen");
-			off_t dlopen_offset = (off_t)PTRDIFF(dlopen_local, libdl.local);
-			DBG("dlopen offset: 0x%lx", dlopen_offset);
-			ctx->dlopen_offset = dlopen_offset;
-		}
-
-		dlclose(h_libdl);
-	}
-
-
-	ez_addr libc_dlopen = sym_addr(h_ldso, "_dl_load_shared_library", ldso);
-
-	ez_addr uclibc_sym_tables = sym_addr(h_ldso, "_dl_symbol_tables", ldso);
-	ez_addr uclibc_loaded_modules = sym_addr(h_ldso, "_dl_loaded_modules", ldso);
-
-#ifdef EZ_ARCH_MIPS
-	ez_addr uclibc_mips_got_reloc = sym_addr(h_ldso, "_dl_perform_mips_global_got_relocations", ldso);
-	DBGPTR(uclibc_mips_got_reloc.local);
-	DBGPTR(uclibc_mips_got_reloc.remote);
-	ctx->uclibc_mips_got_reloc = uclibc_mips_got_reloc;
-#endif
-
-	ez_addr uclibc_dl_fixup = sym_addr(h_ldso, "_dl_fixup", ldso);
-
-	DBGPTR(uclibc_sym_tables.local);
-	DBGPTR(uclibc_sym_tables.remote);
-	ctx->uclibc_sym_tables = uclibc_sym_tables;
-
-	DBGPTR(uclibc_loaded_modules.local);
-	DBGPTR(uclibc_loaded_modules.remote);
-	ctx->uclibc_loaded_modules = uclibc_loaded_modules;
-
-	DBGPTR(uclibc_dl_fixup.local);
-	DBGPTR(uclibc_dl_fixup.remote);
-	ctx->uclibc_dl_fixup = uclibc_dl_fixup;
-
-	dlclose(h_ldso);
-#endif
-	DBGPTR(libc_dlopen.local);
-	DBGPTR(libc_dlopen.remote);
-	ctx->libc_dlopen = libc_dlopen;
-
-	ez_addr libc_clone = sym_addr(h_libc, "clone", libc);
-	DBGPTR(libc_clone.local);
-	DBGPTR(libc_clone.remote);
+	DECL_SYM(libc_clone, libc, "clone");
+	DBGADDR(libc_clone);
 	ctx->libc_clone = libc_clone;
 
-	ez_addr libc_syscall = sym_addr(h_libc, "syscall", libc);
-	DBGPTR(libc_syscall.local);
-	DBGPTR(libc_syscall.remote);
+	DECL_SYM(libc_syscall, libc, "syscall");
+	DBGADDR(libc_syscall);
 	ctx->libc_syscall = libc_syscall;
 
-	dlclose(h_libc);
+	dlclose(libc.handle);
 	return 0;
 }
 
@@ -272,7 +170,7 @@ void strPush(char **strData, struct ezinj_str str){
 }
 
 
-struct injcode_bearing *prepare_bearing(struct ezinj_ctx ctx, int argc, char *argv[]){
+int prepare_bearing(struct ezinj_ctx ctx, int argc, char *argv[]){
 	int dyn_ptr_size = argc * sizeof(char *);
 	int dyn_str_size = 0;
 
@@ -301,7 +199,7 @@ struct injcode_bearing *prepare_bearing(struct ezinj_ctx ctx, int argc, char *ar
 		{
 			ERR("realpath: %s", libName);
 			PERROR("realpath");
-			return NULL;
+			return 1;
 		}
 
 		args[argi] = ezstr_new(libName);
@@ -317,7 +215,8 @@ struct injcode_bearing *prepare_bearing(struct ezinj_ctx ctx, int argc, char *ar
 
 	int dyn_total_size = dyn_ptr_size + dyn_str_size;
 
-	struct injcode_bearing *br = malloc(sizeof(*br) + dyn_total_size);
+	// use shared memory as scracth area (will be replaced by bearing)
+	struct injcode_bearing *br = (struct injcode_bearing *)(ctx.mapped_mem);
 	br->libc_clone = (void *)ctx.libc_clone.remote;
 	br->libc_dlopen = (void *)ctx.libc_dlopen.remote;
 	br->actual_dlopen = (void *)ctx.actual_dlopen.remote;
@@ -338,11 +237,14 @@ struct injcode_bearing *prepare_bearing(struct ezinj_ctx ctx, int argc, char *ar
 	for(int i=0; i<num_strings; i++){
 		strPush(&stringData, args[i]);
 	}
-	return br;
+	return 0;
 }
 
 
-struct ezinj_pl prepare_payload(void *mapped_mem, struct injcode_bearing *br){
+struct ezinj_pl prepare_payload(void *mapped_mem){
+	// br from scratch area
+	struct injcode_bearing *br = (struct injcode_bearing *)mapped_mem;
+
 	size_t br_size = sizeof(*br) + br->dyn_size;
 	size_t injected_size = REGION_LENGTH(region_pl_code);
 	DBG("injsize=%zu", injected_size);
@@ -402,7 +304,7 @@ void sigint_handler(int signum){
 	cleanup_ipc(&ctx);
 }
 
-int ezinject_main(
+int ezinject_prepare(
 	struct ezinj_ctx *ctx,
 	int argc, char *argv[]
 ){
@@ -414,16 +316,15 @@ int ezinject_main(
 		return 1;
 	}
 
-	size_t dataLength = ROUND_UP(
+	ctx->backup.size = ROUND_UP(
 		REGION_LENGTH(region_sc_insn),
 		sizeof(uintptr_t)
 	);
-	DBG("dataLength: %zu", dataLength);
-	uint8_t dataBak[dataLength];
+	DBG("backup size: %zu", ctx->backup.size);
 	{ //backup and replace ELF header
-		uintptr_t *pWordsIn = (uintptr_t *)&dataBak;
+		uintptr_t *pWordsIn = (uintptr_t *)&(ctx->backup.data);
 		uintptr_t *pWordsOut = (uintptr_t *)region_sc_insn.start;
-		for(unsigned int i=0; i<dataLength; i+=sizeof(uintptr_t), pWordsIn++, pWordsOut++){
+		for(unsigned int i=0; i<ctx->backup.size; i+=sizeof(uintptr_t), pWordsIn++, pWordsOut++){
 			*pWordsIn = (uintptr_t)ptrace(PTRACE_PEEKTEXT, ctx->target, codeBase + i, 0);
 			ptrace(PTRACE_POKETEXT, ctx->target, codeBase + i, *pWordsOut);
 		}
@@ -449,17 +350,20 @@ int ezinject_main(
 		PERROR("shmget");
 		return 1;
 	}
+	ctx->shm_id = shm_id;
 
 	void *mapped_mem = shmat(shm_id, NULL, SHM_EXEC);
 	if(mapped_mem == MAP_FAILED){
 		PERROR("shmat");
 		return 1;
 	}
+	ctx->mapped_mem = mapped_mem;
 
 	if((sem_id = semget(ctx->target, 1, IPC_CREAT | IPC_EXCL | S_IRWXO)) < 0){
 		perror("semget");
 		return 1;
 	}
+	ctx->sem_id = sem_id;
 
 	// set semaphore to 1
 	struct sembuf sem_op = {
@@ -472,112 +376,121 @@ int ezinject_main(
 		return 1;
 	}
 
-	// Allocate bearing: br is a *LOCAL* pointer
-	struct injcode_bearing *br = prepare_bearing(*ctx, argc, argv);
-	if(br == NULL){
+	if(prepare_bearing(*ctx, argc, argv) != 0){
 		return 1;
 	}
 
-	int err = 1;
-	do {
-		// Prepare payload in shm: pl contains pointers to *SHARED* memory
-		struct ezinj_pl pl = prepare_payload(mapped_mem, br);
+	return 0;
+}
 
-		// swap local br pointer with shared
-		free(br);
-
-#ifdef HAVE_SHM_SYSCALLS
-		int remote_shm_id = (int)CHECK(RSCALL3(ctx, __NR_shmget, ctx->target, MAPPINGSIZE, S_IRWXO));
-#else
-		int remote_shm_id = (int)CHECK(RSCALL4(ctx, __NR_ipc, IPCCALL(0, SHMGET), ctx->target, MAPPINGSIZE, S_IRWXO));
-#endif
-		if(remote_shm_id < 0){
-			ERR("Remote shmget failed: %d", remote_shm_id);
-			break;
-		}
-		INFO("Shm id: %d", remote_shm_id);
+int ezinject_process(struct ezinj_ctx *ctx){	
+	// Prepare payload in shm: pl contains pointers to *SHARED* memory
+	struct ezinj_pl pl = prepare_payload(ctx->mapped_mem);
 
 #ifdef HAVE_SHM_SYSCALLS
-		uintptr_t remote_shm_ptr = CHECK(RSCALL3(ctx, __NR_shmat, remote_shm_id, NULL, SHM_EXEC));
+	int remote_shm_id = (int)CHECK(RSCALL3(ctx, __NR_shmget, ctx->target, MAPPINGSIZE, S_IRWXO));
+#else
+	int remote_shm_id = (int)CHECK(RSCALL4(ctx, __NR_ipc, IPCCALL(0, SHMGET), ctx->target, MAPPINGSIZE, S_IRWXO));
+#endif
+	if(remote_shm_id < 0){
+		ERR("Remote shmget failed: %d", remote_shm_id);
+		return 1;
+	}
+	INFO("Shm id: %d", remote_shm_id);
+
+#ifdef HAVE_SHM_SYSCALLS
+	uintptr_t remote_shm_ptr = CHECK(RSCALL3(ctx, __NR_shmat, remote_shm_id, NULL, SHM_EXEC));
 #else
 
-		CHECK(RSCALL3(ctx, __NR_mprotect, codeBase, getpagesize(), PROT_READ | PROT_WRITE | PROT_EXEC));
-		/**
-		 * Calling convention for shmat in sys_ipc()
-		 * arg0 - IPCCALL(0, SHMAT)    specifies version 0 of the call format (1 is apparently "iBCS2 emulator")
-		 * arg1 - shmat: id
-		 * arg2 - shmat: flags
-		 * arg3 - pointer to memory that will hold the resulting shmaddr
-		 * arg4 [VIA STACK] - shmat: shmaddr (we want this to be 0 to let the kernel pick a free region)
-		 * 
-		 * Return: 0 on success, nonzero on error
-		 * Stack layout: arguments start from offset 16 on Mips O32
-		 * 
-		 * We pass shmaddr as arg3 aswell, so that 0 is used as shmaddr and is replaced with the new addr
-		 **/
-		CHECK(RSCALL4(ctx, __NR_ipc, IPCCALL(0, SHMAT), remote_shm_id, SHM_EXEC, codeBase + 4));
-		uintptr_t remote_shm_ptr = ptrace(PTRACE_PEEKTEXT, ctx->target, codeBase + 4);
-		DBGPTR(remote_shm_ptr);
-		CHECK(RSCALL3(ctx, __NR_mprotect, codeBase, getpagesize(), PROT_READ | PROT_EXEC));
+	// make ELF header RWX (to write shmaddr)
+	CHECK(RSCALL3(ctx, __NR_mprotect, ctx->backup.base, getpagesize(), PROT_READ | PROT_WRITE | PROT_EXEC));
+
+	/**
+	 * Calling convention for shmat in sys_ipc()
+	 * arg0 - IPCCALL(0, SHMAT)    specifies version 0 of the call format (1 is apparently "iBCS2 emulator")
+	 * arg1 - shmat: id
+	 * arg2 - shmat: flags
+	 * arg3 - pointer to memory that will hold the resulting shmaddr
+	 * arg4 [VIA STACK] - shmat: shmaddr (we want this to be 0 to let the kernel pick a free region)
+	 * 
+	 * Return: 0 on success, nonzero on error
+	 * Stack layout: arguments start from offset 16 on Mips O32
+	 * 
+	 * We pass shmaddr as arg3 aswell, so that 0 is used as shmaddr and is replaced with the new addr
+	 **/
+	// skip syscall instruction
+	uintptr_t sc_stack = ctx->backup.base + 4;
+	CHECK(RSCALL4(ctx, __NR_ipc, IPCCALL(0, SHMAT), remote_shm_id, SHM_EXEC, sc_stack));
+	// read overwritten shmaddr
+	uintptr_t remote_shm_ptr = ptrace(PTRACE_PEEKTEXT, ctx->target, sc_stack);
+	DBGPTR(remote_shm_ptr);
+
+	// reset ELF header to RX
+	CHECK(RSCALL3(ctx, __NR_mprotect, ctx->backup.base, getpagesize(), PROT_READ | PROT_EXEC));
 #endif
-		if(remote_shm_ptr == (uintptr_t)MAP_FAILED || remote_shm_ptr == 0){
-			ERR("Remote shmat failed: %p", (void *)remote_shm_ptr);
-			break;
-		}
-
-		#define PL_REMOTE(pl_addr) \
-			UPTR(remote_shm_ptr + PTRDIFF(pl_addr, mapped_mem))
-
-		#define PL_REMOTE_CODE(addr) \
-			PL_REMOTE(pl.code_start) + PTRDIFF(addr, &injected_code_start)
-
-		// clone entry
-		uintptr_t remote_clone_entry = PL_REMOTE_CODE(&injected_clone_entry);
-
-		// stack base
-		uintptr_t *target_sp = (uintptr_t *)((uintptr_t)STACKALIGN(mapped_mem + MAPPINGSIZE - STACKSIZE));
-
-		// end of stack: used for arguments (add an extra for clone())
-		uintptr_t *stack_argv = (uintptr_t *)(
-			(uintptr_t)target_sp + STACKSIZE - sizeof(uintptr_t) * 6
-		);
-
-		DBGPTR(target_sp);
-
-		// br argument
-		stack_argv[0] = PL_REMOTE(pl.br_start);
-		// clone_fn
-		stack_argv[1] = PL_REMOTE_CODE(&clone_fn);
-		// pointer to this stack itself
-		stack_argv[2] = PL_REMOTE(target_sp);
-
-		DBGPTR(stack_argv[0]);
-		DBGPTR(stack_argv[1]);
-		DBGPTR(stack_argv[2]);
-
-		{ //restore ELF header
-			uintptr_t *pWordsOut = (uintptr_t *)&dataBak;
-			for(unsigned int i=0; i<dataLength; i+=sizeof(uintptr_t), pWordsOut++){
-				ptrace(PTRACE_POKETEXT, ctx->target, codeBase + i, *pWordsOut);
-			}
-		}
-
-		DBGPTR(remote_clone_entry);
-
-		ctx->syscall_stack.remote = (uintptr_t)PL_REMOTE(stack_argv);
-		pid_t tid = __RCALL(ctx, remote_clone_entry, 0);
-		CHECK(tid);
-
-		err = 0;
-	} while(0);
-
-	if(err != 0){
-		return err;
+	if(remote_shm_ptr == (uintptr_t)MAP_FAILED || remote_shm_ptr == 0){
+		ERR("Remote shmat failed: %p", (void *)remote_shm_ptr);
+		return 1;
 	}
 
-	ctx->sem_id = sem_id;
-	ctx->shm_id = shm_id;
-	ctx->mapped_mem = mapped_mem;
+	#define PL_REMOTE(pl_addr) \
+		UPTR(remote_shm_ptr + PTRDIFF(pl_addr, ctx->mapped_mem))
+
+	#define PL_REMOTE_CODE(addr) \
+		PL_REMOTE(pl.code_start) + PTRDIFF(addr, &injected_code_start)
+
+	// clone entry
+	uintptr_t remote_clone_entry = PL_REMOTE_CODE(&injected_clone_entry);
+
+	// stack base
+	uintptr_t *target_sp = (uintptr_t *)((uintptr_t)STACKALIGN(ctx->mapped_mem + MAPPINGSIZE - STACKSIZE));
+
+	// end of stack: used for arguments (add an extra for clone())
+	uintptr_t *stack_argv = (uintptr_t *)(
+		(uintptr_t)target_sp + STACKSIZE - sizeof(uintptr_t) * 6
+	);
+
+	DBGPTR(target_sp);
+
+	// br argument
+	stack_argv[0] = PL_REMOTE(pl.br_start);
+	// clone_fn
+	stack_argv[1] = PL_REMOTE_CODE(&clone_fn);
+	// pointer to this stack itself
+	stack_argv[2] = PL_REMOTE(target_sp);
+
+	DBGPTR(stack_argv[0]);
+	DBGPTR(stack_argv[1]);
+	DBGPTR(stack_argv[2]);
+
+	{ //restore ELF header
+		uintptr_t *pWordsOut = (uintptr_t *)&(ctx->backup.data);
+		for(unsigned int i=0; i<ctx->backup.size; i+=sizeof(uintptr_t), pWordsOut++){
+			ptrace(PTRACE_POKETEXT, ctx->target, ctx->backup.base + i, *pWordsOut);
+		}
+	}
+
+	DBGPTR(remote_clone_entry);
+
+	ctx->syscall_stack.remote = (uintptr_t)PL_REMOTE(stack_argv);
+	pid_t tid = __RCALL(ctx, remote_clone_entry, 0);
+	CHECK(tid);
+
+	return 0;
+}
+
+int ezinject_main(
+	struct ezinj_ctx *ctx,
+	int argc, char *argv[]
+){
+	int err = 1;
+	if((err = ezinject_prepare(ctx, argc, argv)) != 0){
+		return err;
+	}
+	
+	if((err = ezinject_process(ctx)) != 0){
+		return err;
+	}
 	return 0;
 }
 
