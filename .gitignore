@@ -3,3 +3,6 @@ ezpatcharm
 target
 targetarm
 build/
+
+*.a
+*.so
